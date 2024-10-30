@@ -5,6 +5,9 @@
     clippy::too_many_arguments,
     clippy::unnecessary_wraps
 )]
+use v_t::assets::{
+    ColorAttachment, ColorResolveAttachment, DepthStencilAttachment, ExtendAttachmentDescription,
+};
 
 use anyhow::{anyhow, Result};
 use cgmath::{point3, vec2, vec3, Deg};
@@ -157,7 +160,7 @@ impl Drop for App {
 }
 
 impl App {
-    /// Creates our Vulkan app.
+    /// gCreates our Vulkan app.
     unsafe fn new(window: &Window) -> Result<Self> {
         let loader = LibloadingLoader::new(LIBRARY)?;
         let entry = Entry::new(loader).map_err(|error| anyhow!("{}", error))?;
@@ -170,15 +173,15 @@ impl App {
         let device = data.create_logical_device(&entry, &vk_instance)?;
 
         data.create_swapchain(window, &vk_instance, &device)?;
-        create_swapchain_image_views(&device, &mut data)?;
+        data.create_swapchain_image_views(&device)?;
 
         data.create_render_pass(&vk_instance, &device)?;
-        create_descriptor_set_layout(&device, &mut data)?;
+        data.create_descriptor_set_layout(&device)?;
         data.create_pipeline(&device)?;
 
-        create_command_pools(&vk_instance, &device, &mut data)?;
-        create_color_objects(&vk_instance, &device, &mut data)?;
-        create_depth_objects(&vk_instance, &device, &mut data)?;
+        data.create_command_pools(&vk_instance, &device)?;
+        data.create_color_objects(&vk_instance, &device)?;
+        data.create_depth_objects(&vk_instance, &device)?;
         data.create_framebuffers(&device)?;
 
         data.create_texture_image(&vk_instance, &device)?;
@@ -190,8 +193,8 @@ impl App {
         data.create_index_buffer(&vk_instance, &device)?;
         data.create_uniform_buffers(&vk_instance, &device)?;
 
-        create_descriptor_pool(&device, &mut data)?;
-        create_descriptor_sets(&device, &mut data)?;
+        data.create_descriptor_pool(&device)?;
+        data.create_descriptor_sets(&device)?;
         data.create_command_buffers(&device)?;
 
         data.create_sync_objects(&device)?;
@@ -429,17 +432,19 @@ impl App {
 
         self.data
             .create_swapchain(window, &self.vk_instance, &self.device)?;
-        create_swapchain_image_views(&self.device, &mut self.data)?;
+        self.data.create_swapchain_image_views(&self.device)?;
         self.data
             .create_render_pass(&self.vk_instance, &self.device)?;
         self.data.create_pipeline(&self.device)?;
-        create_color_objects(&self.vk_instance, &self.device, &mut self.data)?;
-        create_depth_objects(&self.vk_instance, &self.device, &mut self.data)?;
+        self.data
+            .create_color_objects(&self.vk_instance, &self.device)?;
+        self.data
+            .create_depth_objects(&self.vk_instance, &self.device)?;
         self.data.create_framebuffers(&self.device)?;
         self.data
             .create_uniform_buffers(&self.vk_instance, &self.device)?;
-        create_descriptor_pool(&self.device, &mut self.data)?;
-        create_descriptor_sets(&self.device, &mut self.data)?;
+        self.data.create_descriptor_pool(&self.device)?;
+        self.data.create_descriptor_sets(&self.device)?;
         self.data.create_command_buffers(&self.device)?;
 
         self.data
@@ -547,6 +552,218 @@ struct AppData {
     images_in_flight: Vec<vk::Fence>,
 }
 impl AppData {
+    unsafe fn create_descriptor_sets(&mut self, device: &Device) -> Result<()> {
+        alloc_descriptor_set(device, self)?;
+
+        let _ = (0..self.swapchain_images.len())
+            .into_iter()
+            .map(|idx| {
+                let create_buffer_info = vk::DescriptorBufferInfo::builder()
+                    .buffer(self.uniform_buffers[idx])
+                    .offset(0)
+                    .range(size_of::<UniformBufferObject>() as u64);
+
+                let create_image_info = vk::DescriptorImageInfo::builder()
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image_view(self.texture_image_view)
+                    .sampler(self.texture_sampler);
+
+                let buffer_info = &[create_buffer_info];
+                let image_info = &[create_image_info];
+
+                let ubo_write = vk::WriteDescriptorSet::builder()
+                    .dst_set(self.descriptor_sets[idx])
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(buffer_info);
+
+                let sampler_write = vk::WriteDescriptorSet::builder()
+                    .dst_set(self.descriptor_sets[idx])
+                    .dst_binding(1)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(image_info);
+
+                device.update_descriptor_sets(
+                    &[ubo_write, sampler_write],
+                    &[] as &[vk::CopyDescriptorSet],
+                );
+            })
+            .collect::<Vec<_>>();
+
+        Ok(())
+    }
+
+    unsafe fn create_descriptor_pool(&mut self, device: &Device) -> Result<()> {
+        let ubo_size = vk::DescriptorPoolSize::builder()
+            .type_(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(self.swapchain_images.len() as u32);
+
+        let sampler_size = vk::DescriptorPoolSize::builder()
+            .type_(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(self.swapchain_images.len() as u32);
+
+        let pool_size = &[ubo_size, sampler_size];
+        let create_info = vk::DescriptorPoolCreateInfo::builder()
+            .pool_sizes(pool_size)
+            .max_sets(self.swapchain_images.len() as u32);
+
+        match device.create_descriptor_pool(&create_info, None) {
+            Ok(desc_pool) => {
+                self.descriptor_pool = desc_pool;
+                Ok(())
+            }
+            Err(err) => Err(anyhow!("Device could not create descriptor pool.\n{}", err)),
+        }
+    }
+
+    unsafe fn create_depth_objects(&mut self, instance: &Instance, device: &Device) -> Result<()> {
+        let format = vk::Format::get_depth_format(instance, self)?;
+
+        match device.create_appdata_image(
+            instance,
+            self,
+            self.swapchain_extent.width,
+            self.swapchain_extent.height,
+            1,
+            self.msaa_samples,
+            format,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ) {
+            Ok((depth_image, depth_image_memory)) => {
+                match device.create_appdata_image_view(
+                    depth_image,
+                    format,
+                    vk::ImageAspectFlags::DEPTH,
+                    1,
+                ) {
+                    Ok(img_view) => {
+                        self.depth_image = depth_image;
+                        self.depth_image_memory = depth_image_memory;
+                        self.depth_image_view = img_view;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        return Err(anyhow!(
+                            "Could not create image view for depth objects. \nError: {}",
+                            error
+                        ))
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "Could not create image for depth objects. \nError: {}",
+                    error
+                ))
+            }
+        }
+    }
+
+    unsafe fn create_color_objects(&mut self, instance: &Instance, device: &Device) -> Result<()> {
+        match device.create_appdata_image(
+            instance,
+            self,
+            self.swapchain_extent.width,
+            self.swapchain_extent.height,
+            1,
+            self.msaa_samples,
+            self.swapchain_format,
+            vk::ImageTiling::OPTIMAL,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ) {
+            Ok((color_image, color_image_memory)) => {
+                match device.create_appdata_image_view(
+                    color_image,
+                    self.swapchain_format,
+                    vk::ImageAspectFlags::COLOR,
+                    1,
+                ) {
+                    Ok(img_view) => {
+                        self.color_image = color_image;
+                        self.color_image_memory = color_image_memory;
+                        self.color_image_view = img_view;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        return Err(anyhow!(
+                            "Could not create image view for color objects. \nError: {}",
+                            error
+                        ))
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "Could not create image for color objects. \nError: {}",
+                    error
+                ))
+            }
+        }
+    }
+
+    unsafe fn create_descriptor_set_layout(&mut self, device: &Device) -> Result<()> {
+        let ubo_binding = vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::VERTEX);
+
+        let sampler_binding = vk::DescriptorSetLayoutBinding::builder()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+
+        let bindings = &[ubo_binding, sampler_binding];
+
+        let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(bindings);
+
+        match device.create_descriptor_set_layout(&create_info, None) {
+            Ok(desc_set_layout) => {
+                self.descriptor_set_layout = desc_set_layout;
+                Ok(())
+            }
+            Err(err) => Err(anyhow!(
+                "Device could not create descriptor set layout.\n{}",
+                err
+            )),
+        }
+    }
+
+    unsafe fn create_swapchain_image_views(&mut self, device: &Device) -> Result<()> {
+        self.swapchain_image_views = self
+            .swapchain_images
+            .iter()
+            .map(|img| {
+                device.create_appdata_image_view(
+                    *img,
+                    self.swapchain_format,
+                    vk::ImageAspectFlags::COLOR,
+                    1,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(())
+    }
+
+    unsafe fn create_command_pools(&mut self, instance: &Instance, device: &Device) -> Result<()> {
+        self.command_pool = create_appdata_command_pool(instance, device, self)?;
+
+        let num_images = self.swapchain_images.len();
+        for _ in 0..num_images {
+            let command_pool = create_appdata_command_pool(instance, device, self)?;
+            self.command_pools.push(command_pool);
+        }
+
+        Ok(())
+    }
+
     unsafe fn pick_physical_device(&mut self, instance: &Instance) -> Result<()> {
         for physical_device in instance.enumerate_physical_devices()? {
             let properties = instance.get_physical_device_properties(physical_device);
@@ -569,37 +786,19 @@ impl AppData {
         Err(anyhow!("Could not find suitable physical device."))
     }
     unsafe fn create_render_pass(&mut self, instance: &Instance, device: &Device) -> Result<()> {
-        let color_attachment = vk::AttachmentDescription::builder()
-            .format(self.swapchain_format)
-            .samples(self.msaa_samples)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        let color_attachment = vk::AttachmentDescriptionBuilder::typed_builder::<ColorAttachment>(
+            self.swapchain_format,
+            Some(self.msaa_samples),
+        );
+        let depth_stencil_attachment =
+            vk::AttachmentDescriptionBuilder::typed_builder::<DepthStencilAttachment>(
+                vk::Format::get_depth_format(instance, self)?,
+                Some(self.msaa_samples),
+            );
 
-        let depth_stencil_attachment = vk::AttachmentDescription::builder()
-            .format(vk::Format::get_depth_format(instance, self)?)
-            .samples(self.msaa_samples)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
-        let color_resolve_attachment = vk::AttachmentDescription::builder()
-            .format(self.swapchain_format)
-            .samples(vk::SampleCountFlags::_1)
-            .load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-
-        // Subpasses
+        let color_resolve_attachment = vk::AttachmentDescriptionBuilder::typed_builder::<
+            ColorResolveAttachment,
+        >(self.swapchain_format, None);
 
         let color_attachment_ref = vk::AttachmentReference::builder()
             .attachment(0)
@@ -740,8 +939,8 @@ impl AppData {
         let vert = include_bytes!("../shaders/vert.spv");
         let frag = include_bytes!("../shaders/frag.spv");
 
-        let vert_shader_module = vk::ShaderModule::create_shader_module(device, &vert[..])?;
-        let frag_shader_module = vk::ShaderModule::create_shader_module(device, &frag[..])?;
+        let vert_shader_module = device.create_appdata_shader_module(&vert[..])?;
+        let frag_shader_module = device.create_appdata_shader_module(&frag[..])?;
 
         let vert_stage = vk::PipelineShaderStageCreateInfo::builder()
             .stage(vk::ShaderStageFlags::VERTEX)
@@ -1109,9 +1308,7 @@ impl Texture for AppData {
                 ),
                 _ => {
                     return Err(anyhow!(
-                        "Unsupported image layout transition!\n{:?}\n{:?}",
-                        old_layout,
-                        new_layout
+                        "Unsupported image layout transition!\n{old_layout:?}\n{new_layout:?}",
                     ))
                 }
             };
@@ -1468,101 +1665,6 @@ impl Buffers for AppData {
     }
 }
 
-unsafe fn create_descriptor_sets(device: &Device, data: &mut AppData) -> Result<()> {
-    alloc_descriptor_set(device, data)?;
-
-    let _ = (0..data.swapchain_images.len())
-        .into_iter()
-        .map(|idx| {
-            let create_buffer_info = vk::DescriptorBufferInfo::builder()
-                .buffer(data.uniform_buffers[idx])
-                .offset(0)
-                .range(size_of::<UniformBufferObject>() as u64);
-
-            let create_image_info = vk::DescriptorImageInfo::builder()
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image_view(data.texture_image_view)
-                .sampler(data.texture_sampler);
-
-            let buffer_info = &[create_buffer_info];
-            let image_info = &[create_image_info];
-
-            let ubo_write = vk::WriteDescriptorSet::builder()
-                .dst_set(data.descriptor_sets[idx])
-                .dst_binding(0)
-                .dst_array_element(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(buffer_info);
-
-            let sampler_write = vk::WriteDescriptorSet::builder()
-                .dst_set(data.descriptor_sets[idx])
-                .dst_binding(1)
-                .dst_array_element(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(image_info);
-
-            device.update_descriptor_sets(
-                &[ubo_write, sampler_write],
-                &[] as &[vk::CopyDescriptorSet],
-            );
-        })
-        .collect::<Vec<_>>();
-
-    Ok(())
-}
-
-unsafe fn create_descriptor_pool(device: &Device, data: &mut AppData) -> Result<()> {
-    let ubo_size = vk::DescriptorPoolSize::builder()
-        .type_(vk::DescriptorType::UNIFORM_BUFFER)
-        .descriptor_count(data.swapchain_images.len() as u32);
-
-    let sampler_size = vk::DescriptorPoolSize::builder()
-        .type_(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .descriptor_count(data.swapchain_images.len() as u32);
-
-    let pool_size = &[ubo_size, sampler_size];
-    let create_info = vk::DescriptorPoolCreateInfo::builder()
-        .pool_sizes(pool_size)
-        .max_sets(data.swapchain_images.len() as u32);
-
-    match device.create_descriptor_pool(&create_info, None) {
-        Ok(desc_pool) => {
-            data.descriptor_pool = desc_pool;
-            Ok(())
-        }
-        Err(err) => Err(anyhow!("Device could not create descriptor pool.\n{}", err)),
-    }
-}
-
-unsafe fn create_descriptor_set_layout(device: &Device, data: &mut AppData) -> Result<()> {
-    let ubo_binding = vk::DescriptorSetLayoutBinding::builder()
-        .binding(0)
-        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-        .descriptor_count(1)
-        .stage_flags(vk::ShaderStageFlags::VERTEX);
-
-    let sampler_binding = vk::DescriptorSetLayoutBinding::builder()
-        .binding(1)
-        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .descriptor_count(1)
-        .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-
-    let bindings = &[ubo_binding, sampler_binding];
-
-    let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(bindings);
-
-    match device.create_descriptor_set_layout(&create_info, None) {
-        Ok(desc_set_layout) => {
-            data.descriptor_set_layout = desc_set_layout;
-            Ok(())
-        }
-        Err(err) => Err(anyhow!(
-            "Device could not create descriptor set layout.\n{}",
-            err
-        )),
-    }
-}
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 struct UniformBufferObject {
@@ -1685,102 +1787,6 @@ extern "system" fn debug_callback(
     vk::FALSE
 }
 
-unsafe fn create_depth_objects(
-    instance: &Instance,
-    device: &Device,
-    data: &mut AppData,
-) -> Result<()> {
-    let format = vk::Format::get_depth_format(instance, data)?;
-
-    match device.create_appdata_image(
-        instance,
-        data,
-        data.swapchain_extent.width,
-        data.swapchain_extent.height,
-        1,
-        data.msaa_samples,
-        format,
-        vk::ImageTiling::OPTIMAL,
-        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    ) {
-        Ok((depth_image, depth_image_memory)) => {
-            match device.create_appdata_image_view(
-                depth_image,
-                format,
-                vk::ImageAspectFlags::DEPTH,
-                1,
-            ) {
-                Ok(img_view) => {
-                    data.depth_image = depth_image;
-                    data.depth_image_memory = depth_image_memory;
-                    data.depth_image_view = img_view;
-                    Ok(())
-                }
-                Err(error) => {
-                    return Err(anyhow!(
-                        "Could not create image view for depth objects. \nError: {}",
-                        error
-                    ))
-                }
-            }
-        }
-        Err(error) => {
-            return Err(anyhow!(
-                "Could not create image for depth objects. \nError: {}",
-                error
-            ))
-        }
-    }
-}
-
-unsafe fn create_color_objects(
-    instance: &Instance,
-    device: &Device,
-    data: &mut AppData,
-) -> Result<()> {
-    match device.create_appdata_image(
-        instance,
-        data,
-        data.swapchain_extent.width,
-        data.swapchain_extent.height,
-        1,
-        data.msaa_samples,
-        data.swapchain_format,
-        vk::ImageTiling::OPTIMAL,
-        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT,
-        vk::MemoryPropertyFlags::DEVICE_LOCAL,
-    ) {
-        Ok((color_image, color_image_memory)) => {
-            match device.create_appdata_image_view(
-                color_image,
-                data.swapchain_format,
-                vk::ImageAspectFlags::COLOR,
-                1,
-            ) {
-                Ok(img_view) => {
-                    data.color_image = color_image;
-                    data.color_image_memory = color_image_memory;
-                    data.color_image_view = img_view;
-                    Ok(())
-                }
-                Err(error) => {
-                    return Err(anyhow!(
-                        "Could not create image view for color objects. \nError: {}",
-                        error
-                    ))
-                }
-            }
-        }
-        Err(error) => {
-            return Err(anyhow!(
-                "Could not create image for color objects. \nError: {}",
-                error
-            ))
-        }
-    }
-}
-
 trait ExtendVkDeviceObj {
     unsafe fn copy_buffer_to_image(
         &self,
@@ -1833,9 +1839,26 @@ trait ExtendVkDeviceObj {
         usage: vk::BufferUsageFlags,
         properties: vk::MemoryPropertyFlags,
     ) -> Result<(vk::Buffer, vk::DeviceMemory)>;
+    unsafe fn create_appdata_shader_module(&self, bytecode: &[u8]) -> Result<vk::ShaderModule>;
 }
 
 impl ExtendVkDeviceObj for Device {
+    unsafe fn create_appdata_shader_module(&self, bytecode: &[u8]) -> Result<vk::ShaderModule> {
+        let bytecode = match Bytecode::new(bytecode) {
+            Ok(bytecode) => bytecode,
+            Err(err) => {
+                return Err(anyhow!(
+                    "Allocation of aligned buffer failed or byte slice is not multiple of 4."
+                ))
+            }
+        };
+        let info = vk::ShaderModuleCreateInfo::builder()
+            .code_size(bytecode.code_size())
+            .code(bytecode.code());
+
+        Ok(self.create_shader_module(&info, None)?)
+    }
+
     unsafe fn create_appdata_buffer(
         &self,
         instance: &Instance,
@@ -2281,9 +2304,7 @@ impl ExtendVkInstance for Instance {
     }
 }
 
-// Semaphores
-
-unsafe fn create_command_pool(
+unsafe fn create_appdata_command_pool(
     instance: &Instance,
     device: &Device,
     data: &mut AppData,
@@ -2309,46 +2330,6 @@ unsafe fn create_command_pool(
     }
 }
 
-unsafe fn create_command_pools(
-    instance: &Instance,
-    device: &Device,
-    data: &mut AppData,
-) -> Result<()> {
-    data.command_pool = create_command_pool(instance, device, data)?;
-
-    let num_images = data.swapchain_images.len();
-    for _ in 0..num_images {
-        let command_pool = create_command_pool(instance, device, data)?;
-        data.command_pools.push(command_pool);
-    }
-
-    Ok(())
-}
-
-//Pipe Line
-trait ExtendShaderModule {
-    unsafe fn create_shader_module(device: &Device, bytecode: &[u8]) -> Result<vk::ShaderModule>;
-}
-
-impl ExtendShaderModule for vk::ShaderModule {
-    unsafe fn create_shader_module(device: &Device, bytecode: &[u8]) -> Result<vk::ShaderModule> {
-        let bytecode = match Bytecode::new(bytecode) {
-            Ok(bytecode) => bytecode,
-            Err(err) => {
-                return Err(anyhow!(
-                    "Allocation of aligned buffer failed or byte slice is not multiple of 4."
-                ))
-            }
-        };
-        let info = vk::ShaderModuleCreateInfo::builder()
-            .code_size(bytecode.code_size())
-            .code(bytecode.code());
-
-        Ok(device.create_shader_module(&info, None)?)
-    }
-}
-
-// Queue
 #[derive(Clone, Debug, Default)]
 struct QueueFamilyIndices {
     graphics: u32,
@@ -2391,7 +2372,6 @@ impl QueueFamilyIndices {
     }
 }
 
-// Swap chain
 #[derive(Clone, Debug)]
 struct SwapchainSupport {
     capabilities: vk::SurfaceCapabilitiesKHR,
@@ -2453,23 +2433,6 @@ impl SwapchainSupport {
                 .build()
         }
     }
-}
-
-unsafe fn create_swapchain_image_views(device: &Device, data: &mut AppData) -> Result<()> {
-    data.swapchain_image_views = data
-        .swapchain_images
-        .iter()
-        .map(|img| {
-            device.create_appdata_image_view(
-                *img,
-                data.swapchain_format,
-                vk::ImageAspectFlags::COLOR,
-                1,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(())
 }
 
 #[derive(Debug, Error)]
