@@ -24,21 +24,24 @@ pub trait ExtendAttachmentDescription {
     ) -> vk::AttachmentDescriptionBuilder;
 }
 
+#[rustfmt::skip]
 impl ExtendAttachmentDescription for vk::AttachmentDescriptionBuilder {
     fn typed_builder<T: 'static + Any + RefineBounds>(
         format: vk::Format,
         samples: Option<vk::SampleCountFlags>,
     ) -> vk::AttachmentDescriptionBuilder {
         match TypeId::of::<T>() {
-            t @ _ if t == TypeId::of::<ColorAttachment>() => vk::AttachmentDescription::builder()
-                .format(format)
-                .samples(samples.unwrap_or(vk::SampleCountFlags::_1))
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            t @ _ if t == TypeId::of::<ColorAttachment>() => {
+                vk::AttachmentDescription::builder()
+                    .format(format)
+                    .samples(samples.unwrap_or(vk::SampleCountFlags::_1))
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::UNDEFINED)
+                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            },
             t @ _ if t == TypeId::of::<DepthStencilAttachment>() => {
                 vk::AttachmentDescription::builder()
                     .format(format)
@@ -86,7 +89,6 @@ mod tests {
             ColorResolveAttachment,
         >(vk::Format::R8G8B8A8_SRGB, None);
 
-
         assert_eq!(color_attachment.format, vk::Format::R8G8B8A8_SRGB);
         assert_eq!(color_attachment.samples, vk::SampleCountFlags::_1);
         assert_eq!(color_attachment.load_op, vk::AttachmentLoadOp::CLEAR);
@@ -132,7 +134,7 @@ mod tests {
             depth_stencil_attachment.final_layout,
             vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
         );
-        
+
         // Wow thats a lot of word soup.
         assert_eq!(color_resolve_attachment.format, vk::Format::R8G8B8A8_SRGB);
         assert_eq!(color_resolve_attachment.samples, vk::SampleCountFlags::_1);
